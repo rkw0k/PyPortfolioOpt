@@ -27,25 +27,29 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: "pip"
+
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
-          pip install pytest isort black flake8
-          pip install ecos
+          pip install ".[dev,all_extras]"
+
       - name: Test with pytest
         run: |
           pytest ./tests
+
       - name: Check with isort
         run: |
           isort --check --diff .
+
       - name: Check with black
         run: |
           black --check --diff .
+
       - name: Check with flake8
         run: |
           flake8 --show-source --statistics .
