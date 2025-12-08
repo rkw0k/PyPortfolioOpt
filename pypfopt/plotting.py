@@ -103,6 +103,151 @@ def plot_covariance(cov_matrix, plot_correlation=False, show_tickers=True, **kwa
     return ax
 
 
+def plot_portfolio_summary(
+    values,
+    initial_value: float = 1_000_000,
+    sample_trials: int | None = None,
+    inflation_rate: float | None = None,
+    inflation_series=None,
+    trading_periods_per_year: int = 252,
+    ax=None,
+    figsize=(12, 9),
+    showfig=False,
+    filename: str | None = None,
+    **kwargs,
+):
+    """Plot portfolio summary charts: portfolio value, inflation-adjusted value,
+    annual returns and drawdowns.
+
+    Parameters
+    - values: pd.Series (portfolio values) or pd.DataFrame (trials or multi-ticker prices).
+      If DataFrame and values appear normalized (start ~100), they will be scaled by
+      `initial_value` as in `plot_simulation_results`.
+    - initial_value: used to scale normalized series when DataFrame of trials provided.
+    - sample_trials: if DataFrame of trials provided, number of individual trials to overlay.
+    - inflation_rate / inflation_series: same semantics as `plot_simulation_results`.
+    - trading_periods_per_year: used when index is integer-based to convert periods->years.
+    """
+    plt = _import_matplotlib()
+    try:
+        import pandas as pd
+    except Exception:
+        pd = None
+
+    if pd is None:
+        raise TypeError("pandas is required for plot_portfolio_summary")
+
+    # Normalize inputs to a DataFrame of monetary values (index as time)
+    if isinstance(values, pd.DataFrame):
+        df = values.copy()
+        # detect normalized (start ~= 100) heuristically
+        first_row = df.iloc[0].dropna()
+        if not first_row.empty and (first_row.abs() > 0).all() and (first_row.mean() < 200):
+            vals = df / 100.0 * float(initial_value)
+        else:
+            vals = df.astype(float)
+        # choose median series for summary
+        value_series = vals.median(axis=1)
+    elif isinstance(values, pd.Series):
+        value_series = values.astype(float).copy()
+        vals = None
+    else:
+        raise TypeError("values must be a pandas Series or DataFrame")
+
+    # Apply inflation adjustment if requested (same logic as plot_simulation_results)
+    inflation_applied = False
+    if inflation_series is not None:
+        try:
+            inf = pd.Series(inflation_series)
+            inf = inf.reindex(value_series.index)
+            if inf.isnull().any():
+                inf = pd.Series(inflation_series).reset_index(drop=True)
+                inf.index = value_series.index
+            deflator = inf / float(inf.iloc[0])
+            real_series = value_series.divide(deflator.values, axis=0)
+            inflation_applied = True
+        except Exception:
+            inflation_applied = False
+            real_series = value_series
+    elif inflation_rate is not None:
+        t = np.arange(len(value_series))
+        per_period = (1.0 + float(inflation_rate)) ** (t / float(trading_periods_per_year))
+        real_series = value_series / per_period
+        inflation_applied = True
+    else:
+        real_series = value_series
+
+    # Compute annual returns
+    if hasattr(value_series.index, "year"):
+        # Datetime-like index
+        annual = value_series.resample("A").last().pct_change().dropna()
+        annual_real = real_series.resample("A").last().pct_change().dropna()
+        x = annual.index
+    else:
+        # integer index: bucket by trading_periods_per_year
+        years = (np.arange(len(value_series)) // trading_periods_per_year).astype(int)
+        annual = value_series.groupby(years).apply(lambda s: float(s.iloc[-1]) / float(s.iloc[0]) - 1 if len(s) > 1 else np.nan).dropna()
+        annual_real = real_series.groupby(years).apply(lambda s: float(s.iloc[-1]) / float(s.iloc[0]) - 1 if len(s) > 1 else np.nan).dropna()
+        x = annual.index
+
+    # Compute drawdown series
+    running_max = value_series.cummax()
+    drawdown = value_series / running_max - 1
+
+    # Create subplots: value (top), annual returns (middle), drawdown (bottom)
+    fig, axes = plt.subplots(nrows=3, ncols=1, figsize=figsize, sharex=False)
+    ax_val, ax_ann, ax_dd = axes
+
+    # Plot nominal and real portfolio values
+    ax_val.plot(value_series.index, value_series, label="Nominal", color="#1f77b4", linewidth=2)
+    if inflation_applied:
+        ax_val.plot(real_series.index, real_series, label="Inflation-adjusted", color="#ff7f0e", linewidth=2)
+    # If trials provided and sample_trials, overlay some
+    if vals is not None and sample_trials and sample_trials > 0:
+        ncols = vals.shape[1]
+        sample = vals.sample(n=min(sample_trials, ncols), axis=1)
+        for col in sample.columns:
+            ax_val.plot(sample.index, sample[col], lw=0.8, color="#444444", alpha=0.5)
+
+    ax_val.set_title("Portfolio Value" + (" (inflation-adjusted)" if inflation_applied else ""))
+    ax_val.set_ylabel("Value")
+    ax_val.legend()
+
+    # Annual returns bar chart (show nominal and real side-by-side if both exist)
+    width = 0.35
+    if isinstance(x, pd.DatetimeIndex):
+        ax_ann.bar(annual.index, annual.values * 100, width=200, label="Nominal")
+        if inflation_applied:
+            ax_ann.bar(annual_real.index + pd.DateOffset(days=40), annual_real.values * 100, width=200, label="Real")
+    else:
+        idx = np.arange(len(annual))
+        ax_ann.bar(idx - width / 2, annual.values * 100, width=width, label="Nominal")
+        if inflation_applied:
+            ax_ann.bar(idx + width / 2, annual_real.values * 100, width=width, label="Real")
+        ax_ann.set_xticks(idx)
+        ax_ann.set_xticklabels([str(i) for i in x])
+
+    ax_ann.set_ylabel("Annual Return (%)")
+    ax_ann.set_title("Annual Returns")
+    ax_ann.legend()
+
+    # Drawdown plot
+    ax_dd.fill_between(value_series.index, drawdown * 100, color="tab:red", alpha=0.6)
+    ax_dd.set_ylabel("Drawdown (%)")
+    ax_dd.set_title("Drawdowns")
+    ax_dd.axhline(0, color="#000000", linewidth=0.8)
+
+    plt.tight_layout()
+
+    # Save/show
+    if filename:
+        plt.savefig(filename)
+    if showfig:  # pragma: no cover
+        plt.show()
+
+    return (ax_val, ax_ann, ax_dd)
+
+
 def plot_dendrogram(hrp, ax=None, show_tickers=True, **kwargs):
     """
     Plot the clusters in the form of a dendrogram.
@@ -423,4 +568,164 @@ def plot_weights(weights, ax=None, **kwargs):
     ax.invert_yaxis()
 
     _plot_io(**kwargs)
+    return ax
+
+
+def plot_simulation_results(
+    sim_df,
+    initial_value=1_000_000,
+    percentiles=(5, 25, 50, 75, 95),
+    sample_trials=30,
+    ax=None,
+    figsize=(10, 6),
+    showfig=False,
+    inflation_rate: float | None = None,
+    inflation_series=None,
+    trading_periods_per_year: int = 252,
+    **kwargs,
+):
+    """Plot Monte Carlo simulation results.
+
+    The input `sim_df` is expected to be a DataFrame where each column is a
+    trial and rows are time-ordered normalized values (start=100). This
+    function scales values to `initial_value` and plots median and percentile
+    bands, optionally overlaying a sample of individual trials.
+
+    :param sim_df: DataFrame with trials as columns and normalized values (start=100)
+    :type sim_df: pd.DataFrame
+    :param initial_value: starting portfolio value to scale normalized series
+    :type initial_value: float, optional
+    :param percentiles: tuple/list of percentiles to compute and plot (must include median 50)
+    :type percentiles: iterable of ints, optional
+    :param sample_trials: number of individual trial paths to overlay (random sample)
+    :type sample_trials: int, optional
+    :param ax: matplotlib axis to plot to, optional
+    :type ax: matplotlib.axes, optional
+    :param figsize: figure size passed to matplotlib if ax not provided
+    :type figsize: tuple, optional
+    :param showfig: whether to call plt.show(); passed to _plot_io via kwargs
+    :type showfig: bool, optional
+    :return: matplotlib axis
+    :rtype: matplotlib.axes
+    """
+    plt = _import_matplotlib()
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+
+    # Validate sim_df
+    try:
+        import pandas as pd
+    except Exception:
+        pd = None
+
+    if pd is None or not hasattr(sim_df, "columns"):
+        raise TypeError("sim_df must be a pandas DataFrame with trials as columns")
+
+    # Scale normalized series (start=100) to monetary values
+    vals = sim_df / 100.0 * float(initial_value)
+
+    # Apply inflation adjustment if requested. Two options:
+    # - inflation_series: pandas Series (same index as sim_df) giving CPI or price index
+    # - inflation_rate: annual inflation rate (e.g. 0.02 for 2%) applied continuously per period
+    inflation_applied = False
+    if inflation_series is not None:
+        try:
+            import pandas as pd
+
+            # Align and compute deflator (normalize to 1 at first observation)
+            inf = pd.Series(inflation_series)
+            inf = inf.reindex(vals.index)
+            if inf.isnull().any():
+                # try to align by position if index mismatch
+                inf = pd.Series(inflation_series).reset_index(drop=True)
+                inf.index = vals.index
+            deflator = inf / float(inf.iloc[0])
+            vals = vals.divide(deflator.values, axis=0)
+            inflation_applied = True
+        except Exception:
+            # if something fails, ignore inflation adjustment
+            inflation_applied = False
+    elif inflation_rate is not None:
+        # inflation_rate is annual; convert to per-period compounding
+        # t is number of periods since start
+        t = np.arange(len(vals))
+        per_period = (1.0 + float(inflation_rate)) ** (t / float(trading_periods_per_year))
+        vals = vals / per_period[:, None]
+        inflation_applied = True
+
+    # Compute percentiles
+    pct = vals.quantile([p / 100.0 for p in percentiles], axis=1)
+
+    # Ensure median present at 0.5
+    if 0.5 not in pct.index:
+        pct.loc[0.5] = vals.median(axis=1)
+        pct = pct.sort_index()
+
+    # Plot percentile fills (outer to inner) and collect legend handles
+    sorted_pcts = sorted(percentiles)
+    # use a bold/classic colormap for bands (Tableau/tab10) for stronger colors
+    cmap = plt.get_cmap("tab10")
+    band_handles = []
+    band_labels = []
+    n_bands = len(sorted_pcts) // 2
+    # sample the colormap evenly across available band slots
+    for i in range(n_bands):
+        low = sorted_pcts[i]
+        high = sorted_pcts[-(i + 1)]
+        frac = float(i) / max(1, n_bands - 1) if n_bands > 1 else 0.0
+        color = cmap(frac)
+        ax.fill_between(
+            vals.index,
+            pct.loc[low / 100.0],
+            pct.loc[high / 100.0],
+            color=color,
+            alpha=0.35,
+        )
+        from matplotlib.patches import Patch
+
+        band_handles.append(Patch(facecolor=color, alpha=0.35))
+        band_labels.append(f"{low} - {high} pct band")
+
+    # Plot median
+    median = pct.loc[0.5]
+    from matplotlib.lines import Line2D
+
+    # use a strong black for median to contrast clearly with bold bands
+    median_line, = ax.plot(vals.index, median, color="#000000", linewidth=2)
+
+    # Overlay sample trials
+    sample_handle = None
+    if sample_trials and sample_trials > 0:
+        ncols = vals.shape[1]
+        sample = vals.sample(n=min(sample_trials, ncols), axis=1)
+        for col in sample.columns:
+            ax.plot(vals.index, sample[col], lw=0.8, color="#444444", alpha=0.6)
+        sample_handle = Line2D([0], [0], color="#444444", lw=1, alpha=0.6)
+
+    title = "Monte Carlo Simulation Results"
+    if inflation_applied:
+        title += " (inflation-adjusted)"
+    ax.set_title(title)
+    ax.set_xlabel("Time Index")
+    ax.set_ylabel("Portfolio Value (real terms)" if inflation_applied else "Portfolio Value")
+
+    # Build legend: bands (outer->inner), median, sample trials
+    handles = []
+    labels = []
+    # add band handles in same order
+    handles.extend(band_handles[::-1])
+    labels.extend(band_labels[::-1])
+    handles.append(median_line)
+    labels.append("Median")
+    if sample_handle is not None:
+        handles.append(sample_handle)
+        labels.append(f"Sample trials (n={min(sample_trials, vals.shape[1])})")
+
+    ax.legend(handles=handles, labels=labels)
+
+    # Delegate save/show behavior
+    kwargs.setdefault("showfig", showfig)
+    _plot_io(**kwargs)
+
     return ax

@@ -8,7 +8,7 @@ dependencies:
   - matplotlib
   - seaborn
   - jupyterlab
-  - notebook
+  - notebook=6.5.2
   - ipykernel
   - pip
   - pip:

@@ -13,6 +13,7 @@ from .efficient_frontier import (
 )
 from .hierarchical_portfolio import HRPOpt
 from .risk_models import CovarianceShrinkage
+from . import plotting
 
 __version__ = "1.5.6"
 
@@ -29,4 +30,5 @@ __all__ = [
     "EfficientCDaR",
     "HRPOpt",
     "CovarianceShrinkage",
+    "plotting",
 ]
